@@ -69,6 +69,14 @@
   }
 }
 </script>
+    <script>
+      // POLYFILL: Ensure process.env exists so the app doesn't crash in browser environments
+      if (typeof process === "undefined") {
+        window.process = { env: { API_KEY: "" } };
+        // Note: In a real deployment, the build system would replace process.env.API_KEY.
+        // For local HTML opening, it defaults to empty string to allow UI to load.
+      }
+    </script>
 </head>
 <body class="bg-slate-950 text-slate-100 antialiased overflow-hidden select-none h-screen w-screen relative">
 
@@ -84,6 +92,7 @@
       import { GoogleGenAI } from "@google/genai";
 
       // --- Configuration ---
+      // Uses the shimmed process.env if running in raw browser
       const API_KEY = process.env.API_KEY; 
       const GAME_DURATION = 30;
       const TARGET_COUNT = 2;
@@ -106,7 +115,7 @@
         history: JSON.parse(localStorage.getItem('riot_history') || '[]')
       };
 
-      // --- Audio Service (Converted to Vanilla JS Class) ---
+      // --- Audio Service (Vanilla JS Class) ---
       class AudioSynthesizer {
         constructor() {
           this.ctx = null;
@@ -295,9 +304,19 @@
       const audio = new AudioSynthesizer();
 
       // --- Gemini Service ---
-      const ai = new GoogleGenAI({ apiKey: API_KEY });
+      // Guard against missing API Key to prevent crash on init if possible, 
+      // but SDK requires key in constructor. If empty, it might not throw until call.
+      let ai;
+      try {
+        ai = new GoogleGenAI({ apiKey: API_KEY || "dummy_key" });
+      } catch (e) {
+        console.warn("AI Init warning:", e);
+      }
 
       async function generateComment(name, score, accuracy) {
+        if (!API_KEY) {
+          return "通訊中斷：找不到 API 金鑰。模擬訓練結束。";
+        }
         try {
           const prompt = `
             You are a tough, witty, sci-fi drill sergeant. 
