@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RIOT-GO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; }
+      .font-mono { font-family: 'JetBrains Mono', monospace; }
+      
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: #020617; }
+      ::-webkit-scrollbar-thumb { background: #1e293b; }
+      
+      .cursor-crosshair { cursor: crosshair; }
+      
+      @keyframes pop {
+        0% { transform: scale(0); opacity: 0; }
+        60% { transform: scale(1.1); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      
+      .target-anim {
+        animation: pop 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+      }
+
+      /* Moving Grid Background */
+      .perspective-grid {
+        background-image: 
+          linear-gradient(rgba(16, 185, 129, 0.1) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(16, 185, 129, 0.1) 1px, transparent 1px);
+        background-size: 40px 40px;
+        transform: perspective(500px) rotateX(60deg) translateY(-100px) scale(2);
+        animation: grid-move 20s linear infinite;
+        transform-origin: top center;
+        opacity: 0.3;
+        pointer-events: none;
+        position: absolute;
+        inset: 0;
+        z-index: -10;
+      }
+
+      @keyframes grid-move {
+        0% { background-position: 0 0; }
+        100% { background-position: 0 40px; }
+      }
+
+      .clip-path-polygon {
+        clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+      }
+      
+      /* Typewriter cursor effect */
+      .typewriter::after {
+        content: '|';
+        animation: blink 1s step-start infinite;
+      }
+      @keyframes blink { 50% { opacity: 0; } }
+    </style>
+    <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.31.0",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react/": "https://esm.sh/react@^19.2.3/"
+  }
+}
+</script>
+</head>
+<body class="bg-slate-950 text-slate-100 antialiased overflow-hidden select-none h-screen w-screen relative">
+
+    <!-- Background Elements -->
+    <div class="perspective-grid"></div>
+    <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-slate-950 pointer-events-none -z-10"></div>
+    <div class="absolute inset-0 bg-radial-gradient from-transparent to-slate-950 pointer-events-none -z-10"></div>
+
+    <!-- Main App Container -->
+    <div id="app" class="w-full h-full relative z-10"></div>
+
+    <script type="module">
+      import { GoogleGenAI } from "@google/genai";
+
+      // --- Configuration ---
+      const API_KEY = process.env.API_KEY; 
+      const GAME_DURATION = 30;
+      const TARGET_COUNT = 2;
+      const MIN_SIZE = 30;
+      const MAX_SIZE = 60;
+      const SCORES = { BULLSEYE: 150, HIT: 100, MISS: -20 };
+
+      // --- State ---
+      const state = {
+        view: 'LOGIN', // LOGIN, LOBBY, PLAYING, GAME_OVER
+        user: '',
+        score: 0,
+        timeLeft: GAME_DURATION,
+        targets: [],
+        stats: { score: 0, accuracy: 0, shotsFired: 0, targetsHit: 0, bullseyes: 0 },
+        aiComment: '',
+        timerId: null,
+        startTime: 0,
+        leaderboard: JSON.parse(localStorage.getItem('riot_leaderboard') || '[]'),
+        history: JSON.parse(localStorage.getItem('riot_history') || '[]')
+      };
+
+      // --- Audio Service (Converted to Vanilla JS Class) ---
+      class AudioSynthesizer {
+        constructor() {
+          this.ctx = null;
+          this.masterGain = null;
+          this.isPlaying = false;
+          this.tempo = 110;
+          this.lookahead = 25.0;
+          this.scheduleAheadTime = 0.1;
+          this.nextNoteTime = 0.0;
+          this.current16thNote = 0;
+          this.timerID = null;
+          this.bgmGain = null;
+        }
+
+        init() {
+          if (!this.ctx) {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this.masterGain = this.ctx.createGain();
+            this.masterGain.gain.value = 0.5;
+            this.masterGain.connect(this.ctx.destination);
+          }
+          if (this.ctx.state === 'suspended') {
+            this.ctx.resume();
+          }
+        }
+
+        // BGM Logic
+        nextNote() {
+          const secondsPerBeat = 60.0 / this.tempo;
+          this.nextNoteTime += 0.25 * secondsPerBeat;
+          this.current16thNote++;
+          if (this.current16thNote === 64) this.current16thNote = 0;
+        }
+
+        scheduleNote(beatNumber, time) {
+          if (!this.ctx || !this.bgmGain) return;
+          let rootFreq = 277.18; let bassFreq = 69.30;
+          if (beatNumber >= 16 && beatNumber < 32) { rootFreq = 220.00; bassFreq = 55.00; }
+          else if (beatNumber >= 32 && beatNumber < 48) { rootFreq = 329.63; bassFreq = 82.41; }
+          else if (beatNumber >= 48) { rootFreq = 246.94; bassFreq = 61.74; }
+
+          if (beatNumber % 4 === 0) this.playKick(time);
+          if (beatNumber % 2 === 0) this.playBass(time, bassFreq);
+          const interval = [0, 4, 7, 12][beatNumber % 4];
+          const noteFreq = rootFreq * Math.pow(2, interval / 12);
+          this.playArp(time, noteFreq);
+        }
+
+        scheduler() {
+          if (!this.ctx) return;
+          while (this.nextNoteTime < this.ctx.currentTime + this.scheduleAheadTime) {
+            this.scheduleNote(this.current16thNote, this.nextNoteTime);
+            this.nextNote();
+          }
+          if (this.isPlaying) {
+            this.timerID = window.setTimeout(() => this.scheduler(), this.lookahead);
+          }
+        }
+
+        playBGM(volume = 0.05) {
+          if (!this.ctx) this.init();
+          if (this.isPlaying) return;
+          this.isPlaying = true;
+          this.bgmGain = this.ctx.createGain();
+          this.bgmGain.gain.value = volume;
+          this.bgmGain.connect(this.masterGain);
+          this.current16thNote = 0;
+          this.nextNoteTime = this.ctx.currentTime + 0.1;
+          this.scheduler();
+        }
+
+        stopBGM() {
+          this.isPlaying = false;
+          if (this.timerID) {
+            window.clearTimeout(this.timerID);
+            this.timerID = null;
+          }
+          if (this.bgmGain) {
+            const t = this.ctx.currentTime;
+            this.bgmGain.gain.cancelScheduledValues(t);
+            this.bgmGain.gain.linearRampToValueAtTime(0, t + 0.1);
+            setTimeout(() => { this.bgmGain?.disconnect(); this.bgmGain = null; }, 200);
+          }
+        }
+
+        // Instruments
+        playKick(time) {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.frequency.setValueAtTime(150, time);
+          osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.5);
+          gain.gain.setValueAtTime(1.0, time);
+          gain.gain.exponentialRampToValueAtTime(0.001, time + 0.5);
+          osc.connect(gain);
+          gain.connect(this.bgmGain);
+          osc.start(time);
+          osc.stop(time + 0.5);
+        }
+
+        playBass(time, freq) {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          const filter = this.ctx.createBiquadFilter();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(freq, time);
+          filter.type = 'lowpass';
+          filter.frequency.setValueAtTime(300, time);
+          filter.frequency.linearRampToValueAtTime(100, time + 0.2);
+          gain.gain.setValueAtTime(0.8, time);
+          gain.gain.linearRampToValueAtTime(0.01, time + 0.2);
+          osc.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.bgmGain);
+          osc.start(time);
+          osc.stop(time + 0.25);
+        }
+
+        playArp(time, freq) {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(freq, time);
+          gain.gain.setValueAtTime(0.15, time);
+          gain.gain.exponentialRampToValueAtTime(0.01, time + 0.1);
+          osc.connect(gain);
+          gain.connect(this.bgmGain);
+          osc.start(time);
+          osc.stop(time + 0.15);
+        }
+
+        // SFX
+        playShoot(volume = 1) {
+          if (!this.ctx) return;
+          const t = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          const filter = this.ctx.createBiquadFilter();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(600, t);
+          osc.frequency.exponentialRampToValueAtTime(100, t + 0.15);
+          filter.type = 'bandpass';
+          filter.frequency.setValueAtTime(1000, t);
+          filter.frequency.linearRampToValueAtTime(100, t + 0.15);
+          gain.gain.setValueAtTime(0.2 * volume, t);
+          gain.gain.exponentialRampToValueAtTime(0.01 * volume, t + 0.15);
+          osc.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.masterGain);
+          osc.start(t);
+          osc.stop(t + 0.15);
+        }
+
+        playHit(volume = 1) {
+          if (!this.ctx) return;
+          const t = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(1200, t);
+          osc.frequency.exponentialRampToValueAtTime(1800, t + 0.08);
+          gain.gain.setValueAtTime(0.2 * volume, t);
+          gain.gain.exponentialRampToValueAtTime(0.01 * volume, t + 0.08);
+          osc.connect(gain);
+          gain.connect(this.masterGain);
+          osc.start(t);
+          osc.stop(t + 0.08);
+        }
+
+        playMiss(volume = 1) {
+          if (!this.ctx) return;
+          const t = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(150, t);
+          osc.frequency.exponentialRampToValueAtTime(80, t + 0.1);
+          gain.gain.setValueAtTime(0.15 * volume, t);
+          gain.gain.exponentialRampToValueAtTime(0.01 * volume, t + 0.1);
+          osc.connect(gain);
+          gain.connect(this.masterGain);
+          osc.start(t);
+          osc.stop(t + 0.1);
+        }
+      }
+
+      const audio = new AudioSynthesizer();
+
+      // --- Gemini Service ---
+      const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+      async function generateComment(name, score, accuracy) {
+        try {
+          const prompt = `
+            You are a tough, witty, sci-fi drill sergeant. 
+            A recruit named "${name}" just finished a shooting simulation.
+            Stats: Score: ${score}, Accuracy: ${Math.round(accuracy)}%.
+            
+            Provide a 1-sentence comment on their performance in Traditional Chinese (繁體中文).
+            If score < 500, roast them gently. 
+            If score > 1000, praise them begrudgingly.
+            Keep it under 30 words.
+          `;
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+          });
+          return response.text || "動作快點，士兵！沒什麼好說的。";
+        } catch (error) {
+          console.error("AI Error:", error);
+          return "數據連結中斷。槍法不錯，士兵。";
+        }
+      }
+
+      // --- Helper Functions ---
+      function renderLeaderboard(limit = 5) {
+        if (state.leaderboard.length === 0) return '<div class="text-slate-600 text-[10px] italic text-center py-2">暫無數據</div>';
+        return state.leaderboard.slice(0, limit).map(entry => `
+          <div class="flex justify-between items-center text-xs font-mono">
+             <span class="text-slate-400 uppercase w-24 truncate">${entry.name}</span>
+             <span class="text-emerald-400 font-bold">${entry.score}</span>
+          </div>
+        `).join('');
+      }
+
+      // --- View Renderers ---
+      
+      function renderLogin() {
+        const app = document.getElementById('app');
+        app.innerHTML = `
+          <div class="flex flex-col items-center justify-center h-full relative z-10 animate-in fade-in duration-500">
+             <!-- Leaderboard Top Right -->
+             <div class="absolute top-6 right-6 w-64 hidden md:block">
+                <div class="bg-slate-900/80 border border-slate-800 p-4 backdrop-blur-sm">
+                   <div class="text-[10px] text-emerald-500 font-mono uppercase tracking-widest mb-3 border-b border-emerald-500/20 pb-2">
+                      全球菁英榜
+                   </div>
+                   <div class="space-y-2" id="login-leaderboard">
+                      ${renderLeaderboard(5)}
+                   </div>
+                </div>
+             </div>
+
+             <div class="w-full max-w-md p-8 bg-slate-900/80 border border-emerald-500/30 backdrop-blur-sm shadow-[0_0_50px_rgba(16,185,129,0.1)]">
+                <h1 class="text-6xl font-black text-white mb-2 text-center uppercase tracking-tighter italic shadow-emerald-500/50 drop-shadow-lg">RIOT-GO</h1>
+                <div class="text-center text-emerald-500 font-mono text-xs uppercase tracking-[0.3em] mb-8">戰術反應模擬系統</div>
+                
+                <form id="login-form" class="space-y-6">
+                   <div class="relative group">
+                      <label class="block text-[10px] font-mono text-emerald-500 mb-1 uppercase tracking-[0.2em] ml-1">特務代號</label>
+                      <input type="text" id="username" class="w-full bg-slate-950/50 border border-slate-700 text-white px-4 py-3 focus:outline-none focus:border-emerald-500 font-mono text-lg text-center uppercase tracking-widest" placeholder="輸入代號" maxlength="12" required>
+                   </div>
+                   <div class="relative group">
+                      <label class="block text-[10px] font-mono text-emerald-500 mb-1 uppercase tracking-[0.2em] ml-1">安全密碼</label>
+                      <input type="password" id="password" class="w-full bg-slate-950/50 border border-slate-700 text-white px-4 py-3 focus:outline-none focus:border-emerald-500 font-mono text-lg text-center tracking-widest" placeholder="••••••" maxlength="20" required>
+                   </div>
+                   <div id="login-error" class="hidden bg-red-500/10 border border-red-500/50 p-2 text-center animate-pulse">
+                      <span class="text-red-500 font-mono text-xs font-bold tracking-widest uppercase"></span>
+                   </div>
+                   <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black py-4 transition-all uppercase tracking-[0.2em] clip-path-polygon transform hover:scale-[1.02] active:scale-[0.98]">
+                      身份驗證
+                   </button>
+                   <div class="text-center"><p class="text-[10px] text-slate-500 font-mono uppercase tracking-wider">*新帳號將自動註冊</p></div>
+                </form>
+             </div>
+          </div>
+        `;
+
+        document.getElementById('login-form').addEventListener('submit', (e) => {
+          e.preventDefault();
+          const name = document.getElementById('username').value.trim();
+          const pass = document.getElementById('password').value.trim();
+          const errorEl = document.getElementById('login-error');
+          
+          if(!name || !pass) return;
+
+          try {
+            const users = JSON.parse(localStorage.getItem('riot_users') || '{}');
+            if (users[name]) {
+               if (users[name] === pass) {
+                  loginSuccess(name);
+               } else {
+                  errorEl.querySelector('span').innerText = '拒絕存取：密碼錯誤';
+                  errorEl.classList.remove('hidden');
+                  audio.init();
+                  audio.playMiss(0.5);
+               }
+            } else {
+               users[name] = pass;
+               localStorage.setItem('riot_users', JSON.stringify(users));
+               loginSuccess(name);
+            }
+          } catch(err) {
+             console.error(err);
+             errorEl.querySelector('span').innerText = '系統錯誤';
+             errorEl.classList.remove('hidden');
+          }
+        });
+      }
+
+      function loginSuccess(name) {
+         audio.init();
+         state.user = name;
+         state.view = 'LOBBY';
+         renderApp();
+      }
+
+      function renderLobby() {
+        const myHistory = state.history.filter(h => h.name === state.user);
+        const gamesPlayed = myHistory.length;
+        const maxScore = gamesPlayed > 0 ? Math.max(...myHistory.map(h => h.score)) : 0;
+
+        const app = document.getElementById('app');
+        app.innerHTML = `
+          <div class="relative w-full h-full flex flex-col items-center justify-center animate-in fade-in zoom-in duration-300">
+             <!-- Top Bar -->
+             <div class="absolute top-0 left-0 w-full p-6 flex justify-between items-start pointer-events-none">
+                <div class="pointer-events-auto bg-slate-900/50 border border-slate-800 p-4">
+                   <div class="text-[10px] text-emerald-500 font-mono uppercase tracking-widest mb-1">特務檔案</div>
+                   <div class="text-2xl font-bold text-white uppercase tracking-wider mb-1">${state.user}</div>
+                   <div class="text-xs text-slate-400 font-mono">任務場數: <span className="text-white">${gamesPlayed}</span></div>
+                   <div class="text-xs text-slate-400 font-mono">最高紀錄: <span className="text-emerald-400">${maxScore}</span></div>
+                </div>
+                <div class="pointer-events-auto bg-slate-900/50 border border-slate-800 p-4 text-right">
+                   <div class="text-[10px] text-emerald-500 font-mono uppercase tracking-widest mb-1">全球排名</div>
+                   <div class="space-y-1 mt-2">
+                      ${renderLeaderboard(3)}
+                   </div>
+                </div>
+             </div>
+
+             <!-- Center -->
+             <div class="text-center space-y-8">
+                <h1 class="text-8xl font-black italic text-transparent bg-clip-text bg-gradient-to-b from-white to-slate-500 tracking-tighter drop-shadow-2xl">RIOT-GO</h1>
+                <button id="start-btn" class="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-2xl py-6 px-12 min-w-[300px] uppercase tracking-[0.2em] clip-path-polygon transform hover:scale-105 transition-all shadow-[0_0_30px_rgba(16,185,129,0.3)]">
+                   立即出擊
+                </button>
+             </div>
+          </div>
+        `;
+
+        document.getElementById('start-btn').addEventListener('click', () => {
+           state.view = 'PLAYING';
+           renderApp();
+        });
+      }
+
+      function renderGame() {
+         const app = document.getElementById('app');
+         app.innerHTML = `
+           <div class="flex flex-col h-full cursor-crosshair relative">
+             <!-- HUD -->
+             <div class="flex justify-between items-end p-8 w-full max-w-7xl mx-auto pointer-events-none select-none relative z-20">
+                <div class="flex flex-col">
+                   <span class="text-[10px] text-emerald-500 font-mono uppercase tracking-[0.2em] mb-1">特務</span>
+                   <span class="text-2xl font-bold text-white uppercase tracking-widest">${state.user}</span>
+                </div>
+                <div class="absolute top-8 left-1/2 transform -translate-x-1/2 flex flex-col items-center">
+                   <div id="timer-display" class="text-6xl font-black font-mono tracking-tighter tabular-nums text-white">30</div>
+                   <div class="h-1 w-24 bg-slate-800 mt-2 overflow-hidden">
+                       <div id="timer-bar" class="h-full bg-emerald-500 transition-all duration-100 w-full"></div>
+                   </div>
+                </div>
+                <div class="flex flex-col items-end">
+                   <span class="text-[10px] text-emerald-500 font-mono uppercase tracking-[0.2em] mb-1">分數</span>
+                   <span id="score-display" class="text-4xl font-black text-white tabular-nums tracking-tighter">0</span>
+                </div>
+             </div>
+
+             <!-- Game Area -->
+             <div id="game-area" class="flex-1 relative mx-8 mb-8 border border-slate-800/50 bg-slate-900/10 backdrop-blur-[1px] rounded-lg overflow-hidden active:bg-red-500/5 transition-colors duration-75 z-10">
+                <div class="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:50px_50px] pointer-events-none"></div>
+             </div>
+           </div>
+         `;
+         
+         startGameLogic();
+      }
+
+      function startGameLogic() {
+         audio.playBGM(0.05);
+         state.score = 0;
+         state.timeLeft = GAME_DURATION;
+         state.stats = { score: 0, accuracy: 0, shotsFired: 0, targetsHit: 0, bullseyes: 0 };
+         state.targets = [];
+         
+         const gameArea = document.getElementById('game-area');
+         
+         // Click outside target (Miss)
+         gameArea.addEventListener('mousedown', (e) => {
+            if (e.target === gameArea || e.target.classList.contains('pointer-events-none')) {
+               audio.playShoot(1.0);
+               audio.playMiss(1.0);
+               state.score += SCORES.MISS;
+               state.stats.shotsFired++;
+               updateHUD();
+            }
+         });
+
+         // Spawn initial targets
+         setTimeout(() => {
+            for(let i=0; i<TARGET_COUNT; i++) spawnTarget();
+            state.startTime = Date.now();
+            
+            // Timer Loop
+            state.timerId = setInterval(() => {
+               const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
+               state.timeLeft = GAME_DURATION - elapsed;
+               updateHUD();
+               
+               if (state.timeLeft <= 0) {
+                  clearInterval(state.timerId);
+                  endGame();
+               }
+            }, 100);
+         }, 100);
+      }
+
+      function spawnTarget() {
+         const gameArea = document.getElementById('game-area');
+         if (!gameArea) return;
+         
+         const w = gameArea.clientWidth;
+         const h = gameArea.clientHeight;
+         const size = Math.random() * (MAX_SIZE - MIN_SIZE) + MIN_SIZE;
+         const x = Math.random() * (w - size);
+         const y = Math.random() * (h - size);
+         const id = Date.now() + Math.random();
+
+         const el = document.createElement('div');
+         el.className = 'absolute rounded-full cursor-pointer target-anim group flex items-center justify-center hover:scale-105 transition-transform duration-75';
+         el.style.left = `${x}px`;
+         el.style.top = `${y}px`;
+         el.style.width = `${size}px`;
+         el.style.height = `${size}px`;
+         el.style.background = 'radial-gradient(circle at 30% 30%, #34d399, #059669)';
+         el.style.boxShadow = '0 0 20px rgba(16,185,129,0.4), inset 0 0 10px rgba(255,255,255,0.3)';
+         el.dataset.id = id;
+
+         // Bullseye
+         const inner = document.createElement('div');
+         inner.className = 'w-[40%] h-[40%] bg-emerald-950 rounded-full border border-emerald-500/50 relative z-20 hover:bg-emerald-900 transition-colors';
+         inner.innerHTML = '<div class="absolute inset-0 bg-emerald-400/20 rounded-full animate-pulse pointer-events-none"></div>';
+         
+         // Event Listeners
+         const hitHandler = (isBullseye, e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            audio.playShoot(1.0);
+            audio.playHit(isBullseye ? 1.0 : 0.8);
+            
+            const pts = isBullseye ? SCORES.BULLSEYE : SCORES.HIT;
+            state.score += pts;
+            state.stats.shotsFired++;
+            state.stats.targetsHit++;
+            state.stats.score = state.score;
+            if (isBullseye) state.stats.bullseyes++;
+            
+            updateHUD();
+            el.remove();
+            spawnTarget();
+         };
+
+         el.onmousedown = (e) => hitHandler(false, e);
+         inner.onmousedown = (e) => hitHandler(true, e);
+
+         el.appendChild(inner);
+         gameArea.appendChild(el);
+      }
+
+      function updateHUD() {
+         const timeEl = document.getElementById('timer-display');
+         const scoreEl = document.getElementById('score-display');
+         const barEl = document.getElementById('timer-bar');
+         
+         if (timeEl) {
+             const t = Math.max(0, state.timeLeft);
+             timeEl.innerText = t < 10 ? `0${t}` : t;
+             if (t <= 5) timeEl.classList.add('text-red-500', 'animate-pulse');
+             barEl.style.width = `${(t / GAME_DURATION) * 100}%`;
+         }
+         if (scoreEl) scoreEl.innerText = state.score;
+      }
+
+      async function endGame() {
+         audio.stopBGM();
+         const finalAccuracy = state.stats.shotsFired > 0 
+            ? (state.stats.targetsHit / state.stats.shotsFired) * 100 
+            : 0;
+         state.stats.accuracy = finalAccuracy;
+         
+         // Save Stats
+         const entry = {
+            name: state.user,
+            score: state.score,
+            date: new Date().toISOString(),
+            accuracy: finalAccuracy
+         };
+         
+         state.history.push(entry);
+         state.leaderboard.push(entry);
+         state.leaderboard.sort((a,b) => b.score - a.score);
+         
+         localStorage.setItem('riot_history', JSON.stringify(state.history));
+         localStorage.setItem('riot_leaderboard', JSON.stringify(state.leaderboard));
+
+         // Trigger UI update to Game Over (loading state for AI)
+         state.aiComment = ''; 
+         state.view = 'GAME_OVER';
+         renderApp();
+
+         // Fetch AI
+         const comment = await generateComment(state.user, state.score, finalAccuracy);
+         state.aiComment = comment;
+         
+         // Update comment in UI
+         const commentEl = document.getElementById('ai-comment');
+         if (commentEl) {
+             commentEl.innerHTML = `<span class="typewriter">${comment}</span>`;
+         }
+      }
+
+      function renderGameOver() {
+         const app = document.getElementById('app');
+         app.innerHTML = `
+            <div class="flex flex-col items-center justify-center h-full bg-slate-950/95 z-50 absolute inset-0 backdrop-blur-md">
+              <div class="w-full max-w-3xl bg-slate-900/80 border border-slate-800 p-8 shadow-2xl animate-in fade-in zoom-in duration-300 relative overflow-hidden">
+                <div class="absolute inset-0 bg-[linear-gradient(rgba(16,185,129,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(16,185,129,0.03)_1px,transparent_1px)] bg-[size:20px_20px]"></div>
+                
+                <div class="relative z-10">
+                    <h2 class="text-4xl font-black text-white text-center mb-8 uppercase tracking-[0.3em] italic">任務結算報告</h2>
+                    <div class="grid grid-cols-3 gap-4 mb-8">
+                      <div class="bg-slate-950/50 p-6 border-l-4 border-emerald-500">
+                        <div class="text-emerald-500 text-[10px] font-mono uppercase tracking-widest mb-1">總得分</div>
+                        <div class="text-4xl font-black text-white tracking-tighter">${state.stats.score}</div>
+                      </div>
+                      <div class="bg-slate-950/50 p-6 border-l-4 border-cyan-500">
+                        <div class="text-cyan-500 text-[10px] font-mono uppercase tracking-widest mb-1">命中率</div>
+                        <div class="text-4xl font-black text-white tracking-tighter">${Math.round(state.stats.accuracy)}%</div>
+                      </div>
+                      <div class="bg-slate-950/50 p-6 border-l-4 border-amber-500">
+                        <div class="text-amber-500 text-[10px] font-mono uppercase tracking-widest mb-1">精準打擊</div>
+                        <div class="text-4xl font-black text-white tracking-tighter">${state.stats.bullseyes}</div>
+                      </div>
+                    </div>
+
+                    <div class="mb-8 bg-slate-950 border border-slate-800 p-6 relative">
+                      <div class="absolute -top-3 left-4 bg-slate-900 px-2 text-[10px] font-mono text-emerald-500 uppercase tracking-widest border border-slate-800">指揮官講評</div>
+                      <div id="ai-comment" class="text-slate-300 font-mono text-sm leading-relaxed min-h-[3rem] flex items-center">
+                        <span class="animate-pulse text-emerald-500/50">...正在解密訊號...</span>
+                      </div>
+                    </div>
+
+                    <div class="flex gap-4">
+                      <button id="restart-btn" class="flex-1 bg-white hover:bg-emerald-400 text-black font-black py-4 uppercase tracking-[0.1em] transition-colors">再次挑戰</button>
+                      <button id="lobby-btn" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-bold py-4 uppercase tracking-[0.1em] transition-colors">返回大廳</button>
+                      <button id="logout-btn" class="flex-1 border border-slate-700 hover:border-red-500 hover:text-red-500 text-slate-500 font-bold py-4 uppercase tracking-[0.1em] transition-all">登出</button>
+                    </div>
+                </div>
+              </div>
+            </div>
+         `;
+         
+         document.getElementById('restart-btn').onclick = () => { state.view = 'PLAYING'; renderApp(); };
+         document.getElementById('lobby-btn').onclick = () => { state.view = 'LOBBY'; renderApp(); };
+         document.getElementById('logout-btn').onclick = () => { state.view = 'LOGIN'; state.user = ''; renderApp(); };
+      }
+
+      function renderApp() {
+        if (state.view === 'LOGIN') renderLogin();
+        else if (state.view === 'LOBBY') renderLobby();
+        else if (state.view === 'PLAYING') renderGame();
+        else if (state.view === 'GAME_OVER') renderGameOver();
+      }
+
+      // Initial Render
+      renderApp();
+
+    </script>
+</body>
+</html>
